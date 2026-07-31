@@ -12,7 +12,7 @@ The one thing it deliberately refuses to do: hand over **photo blobs**. A single
 
 Setup asks for a **host name and a protocol switch**, never a URL. The CardDAV path is appended by the extension — getting that path wrong is what makes DSM answer with its login page, and the resulting `undefined entity: line 7, column 0` explains nothing to anybody.
 
-See also **[synology-calendar-mcp](https://github.com/sorglos-it/synology-calendar-mcp)** — the same idea for calendars and todos over CalDAV.
+See also **[synology-calendar-mcp](https://github.com/sorglos-it/synology-calendar-mcp)** — the same idea for calendars and todos over CalDAV — and **[github-mcp](https://github.com/sorglos-it/github-mcp)** for repositories on github.com.
 
 ## Features
 
@@ -119,12 +119,14 @@ npx @anthropic-ai/mcpb pack . synology-contacts-1.1.2.mcpb
 
 There is nothing to compile — `server/server.py` carries its dependencies in a PEP 723 header and uv resolves them at first start.
 
-## Support
+## Support this project ❤️
 
 If this extension saved you time, you can support further development:
 
 [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=6CDEVZGJWTNQQ)
 
+**[➡️ Donate via PayPal](https://www.paypal.com/donate/?hosted_button_id=6CDEVZGJWTNQQ)**
+
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE) — © 2026 Thomas Weirich.
