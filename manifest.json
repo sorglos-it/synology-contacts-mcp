@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "synology-contacts",
   "display_name": "Synology Kontakte",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Adressbücher und Kontakte eines Synology-NAS über CardDAV lesen und pflegen.",
   "long_description": "Verbindet Claude mit der Kontakte-App eines Synology-NAS (oder jedem anderen CardDAV-Server).\n\n**Funktionen**\n• Adressbücher auflisten, Kontakte durchsuchen und einzeln abrufen\n• Kontakte anlegen, ändern, löschen — mit mehreren Telefonnummern, E-Mail-Adressen, Organisation, Geburtstag, Kategorien\n• Foto- und Notiz-Blobs werden bewusst nicht ausgeliefert: eine einzelne Synology-vCard kann ein 30 KB großes Base64-JPEG enthalten, das den Kontext ohne jeden Nutzen füllt\n\n**Datenschutz**\nDer Server läuft ausschließlich lokal auf diesem Rechner und spricht direkt mit dem NAS. Es werden keine Daten an Dritte gesendet. Das Passwort wird von Claude Desktop im Schlüsselspeicher des Betriebssystems abgelegt und ist nicht Teil dieses Pakets.\n\n**Voraussetzungen**\n• uv muss installiert sein (https://docs.astral.sh/uv) — es lädt Python und die Abhängigkeiten beim ersten Start selbst nach\n• Erreichbares Synology-NAS mit aktivierter Kontakte-App\n• Bei selbstsigniertem Zertifikat (Synology-Standard): Option \"Zertifikat prüfen\" ausgeschaltet lassen",
   "author": {
@@ -24,7 +24,8 @@
         "CARDDAV_HTTPS": "${user_config.use_https}",
         "CARDDAV_USERNAME": "${user_config.username}",
         "CARDDAV_PASSWORD": "${user_config.password}",
-        "CARDDAV_VERIFY_SSL": "${user_config.verify_ssl}"
+        "CARDDAV_VERIFY_SSL": "${user_config.verify_ssl}",
+        "CARDDAV_TIMEOUT": "${user_config.timeout}"
       }
     }
   },
@@ -61,6 +62,15 @@
       "description": "Bei einem NAS mit selbstsigniertem Zertifikat (Synology-Standard) ausgeschaltet lassen. Einschalten, wenn das NAS ein gültiges Zertifikat (z. B. Let's Encrypt) hat.",
       "required": false,
       "default": false
+    },
+    "timeout": {
+      "type": "number",
+      "title": "Zeitlimit pro Anfrage (Sekunden)",
+      "description": "Wie lange auf eine Antwort des NAS gewartet wird, bevor die Anfrage abgebrochen wird. 45 passt zu einem DSM, das die erste Anmeldung einer Sitzung in rund fünf Sekunden beantwortet und alle weiteren aus dem Sitzungs-Cache bedient. Höher setzen, wenn das NAS träge ist und Anfragen ins Leere laufen; leer lassen übernimmt 45.",
+      "required": false,
+      "default": 45,
+      "min": 5,
+      "max": 600
     }
   },
   "tools": [
