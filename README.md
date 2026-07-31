@@ -45,7 +45,7 @@ Restart Claude Desktop afterwards, otherwise it will not see the new `PATH` and 
 
 ## Installation
 
-1. Grab `synology-contacts-1.1.0.mcpb` from [Releases](https://github.com/sorglos-it/synology-contacts-mcp/releases), or build it yourself (see below).
+1. Grab `synology-contacts-1.1.2.mcpb` from [Releases](https://github.com/sorglos-it/synology-contacts-mcp/releases), or build it yourself (see below).
 2. Claude Desktop → **Settings → Extensions → Advanced settings → Install extension…**, pick the file. Drag and drop onto the extensions window works too.
 3. Fill in the fields (see next section) and enable the extension. The first start takes a moment while uv resolves dependencies.
 4. Ask Claude something like *"which address books do I have?"*.
@@ -95,6 +95,7 @@ Useful if you want to run the server standalone rather than as an extension:
 | `CARDDAV_USERNAME` | DSM login name |
 | `CARDDAV_PASSWORD` | DSM password |
 | `CARDDAV_VERIFY_SSL` | `false` for a self-signed certificate |
+| `CARDDAV_TIMEOUT` | Seconds per HTTP request, default `45`. Blank or unparsable falls back to the default. |
 | `CARDDAV_BASE_URL` | Legacy: a complete endpoint URL, wins over `CARDDAV_HOST` |
 
 ```bash
@@ -108,11 +109,12 @@ uv run --script server/server.py
 - **`delete_contact` is permanent.** There is no CardDAV trash. Identify by UID rather than by name; an ambiguous name is rejected rather than guessed.
 - **Certificate checking off disables TLS verification** for the connection. Right for a self-signed NAS on your own LAN, wrong over the open internet.
 - **The German field labels are not a bug**, just the language the manifest was written in.
+- **DSM is slow to authenticate.** The first authenticated request of a session regularly takes five seconds or more — in clean five-second steps, which is what a lookup running into its own timeout looks like — while later ones come from its session cache in milliseconds. The default of 45 s absorbs that. The **Zeitlimit pro Anfrage** field raises it for a NAS that needs even longer — it arrives as `CARDDAV_TIMEOUT`, in seconds — but a NAS behaving this way is worth a look on the DSM side. A blank or unparsable value falls back to 45 rather than stopping the server.
 
 ## Building the .mcpb yourself
 
 ```bash
-npx @anthropic-ai/mcpb pack . synology-contacts-1.1.0.mcpb
+npx @anthropic-ai/mcpb pack . synology-contacts-1.1.2.mcpb
 ```
 
 There is nothing to compile — `server/server.py` carries its dependencies in a PEP 723 header and uv resolves them at first start.

@@ -15,6 +15,7 @@ Config via environment:
   CARDDAV_USERNAME
   CARDDAV_PASSWORD
   CARDDAV_VERIFY_SSL  "true"/"false" (default true; Synology self-signed -> false)
+  CARDDAV_TIMEOUT     seconds allowed per HTTP request (default 45)
 
   CARDDAV_BASE_URL    legacy: a complete endpoint URL. Still honoured, and wins
                       over CARDDAV_HOST when both are set.
@@ -49,12 +50,34 @@ def _flag(name: str, default: bool = True) -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _seconds(name: str, default: float) -> float:
+    """Read a timeout in seconds. Blank, unparsable or non-positive falls back to
+    the default rather than raising: a typo in this field must not be the reason
+    the whole server refuses to start."""
+    v = os.environ.get(name, "").strip()
+    if not v:
+        return default
+    try:
+        secs = float(v)
+    except ValueError:
+        return default
+    return secs if secs > 0 else default
+
+
 BASE_URL = os.environ.get("CARDDAV_BASE_URL", "").strip()
 HOST = os.environ.get("CARDDAV_HOST", "").strip()
 USE_HTTPS = _flag("CARDDAV_HTTPS")
 USERNAME = os.environ.get("CARDDAV_USERNAME", "")
 PASSWORD = os.environ.get("CARDDAV_PASSWORD", "")
 VERIFY_SSL = _flag("CARDDAV_VERIFY_SSL")
+
+# DSM answers the first authenticated request of a session in five seconds or
+# more - measured in clean five-second steps, the signature of a lookup running
+# into its own timeout - and serves later ones from its session cache in
+# milliseconds. That first request has to fit, so the default is generous.
+# The "Zeitlimit pro Anfrage" field of the extension settings feeds this;
+# anything launching the server directly sets CARDDAV_TIMEOUT itself.
+TIMEOUT = _seconds("CARDDAV_TIMEOUT", 45.0)
 
 # The Synology CardDAV endpoint. DSM serves it off the DSM port, not off 8008.
 DAV_PATH = "/carddav/"
@@ -370,7 +393,7 @@ class Client:
         self._http = httpx.Client(
             auth=httpx.BasicAuth(USERNAME, PASSWORD),
             verify=VERIFY_SSL,
-            timeout=httpx.Timeout(45.0),
+            timeout=httpx.Timeout(TIMEOUT),
             headers={"User-Agent": "carddav-mcp/1.0"},
             follow_redirects=True,
         )
