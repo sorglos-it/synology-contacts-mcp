@@ -478,6 +478,11 @@ class Client:
         try:
             r = self._http.request(method, url, content=body.encode("utf-8") if body else None,
                                    headers=headers, follow_redirects=not write)
+        except httpx.InvalidURL as e:  # not an HTTPError: a typo like nas:50o1
+            raise CardDavError(
+                f"{url} is not a valid address ({e}). Check the NAS address: "
+                "a name or IP, optionally followed by :port."
+            ) from e
         except httpx.HTTPError as e:
             # Certificate checking is on by default, so a NAS still on its
             # self-signed certificate lands here - with an OpenSSL message
@@ -773,17 +778,34 @@ class ContactField(BaseModel):
     type: str = "home"
 
 
-_TYPE = re.compile(r"[^\W_][\w-]{0,29}")
+def _types(types: Iterable[str]) -> list[str]:
+    """TYPE values as single words. A type goes into the parameter unescaped,
+    so ":", ";", '"' or a line break in it would write vCard syntax of the
+    caller's choosing - those are dropped. What get_contact hands out ("cell,
+    voice", a label like "Büro (Zentrale)") comes back on every update of the
+    phones or emails, so it is split and cleaned rather than refused."""
+    out: list[str] = []
+    for t in types:
+        for word in re.split(r"[\s,;/]+", t or ""):
+            word = re.sub(r"[^\w-]", "", word).strip("_-")[:30].upper()
+            if word and word not in out:
+                out.append(word)
+    return out
+
+
+def _clean(v: str | None) -> str:
+    """A value as it will be written, for the "is it empty?" question."""
+    return _CONTROL.sub("", v or "").strip()
+
+
+def _display_name(full_name: str | None, first: str | None, last: str | None,
+                  org: str | None) -> str:
+    return (_clean(full_name) or " ".join(x for x in (_clean(first), _clean(last)) if x)
+            or _clean(org))
 
 
 def _prop_line(name: str, value: str, types: Iterable[str] = ()) -> str:
-    types = [t.strip() for t in types if t and t.strip()]
-    for t in types:
-        # a type goes into the parameter unescaped: ":" or a line break in it
-        # would write vCard syntax of the caller's choosing
-        if not _TYPE.fullmatch(t):
-            raise CardDavError(f"Invalid type {t!r}: use one word, such as home, work or cell.")
-    tp = "".join(f";TYPE={t.upper()}" for t in types)
+    tp = "".join(f";TYPE={t}" for t in _types(types))
     return fold(f"{name}{tp}:{value}")
 
 
@@ -795,7 +817,7 @@ def build_vcard(uid: str, *, full_name: str | None = None,
                 note: str | None = None, birthday: str | None = None,
                 url: str | None = None,
                 categories: list[str] | None = None) -> str:
-    fn = full_name or " ".join(x for x in (first_name, last_name) if x) or organization or "Unnamed"
+    fn = _display_name(full_name, first_name, last_name, organization) or "Unnamed"
     lines = ["BEGIN:VCARD", "VERSION:3.0", "PRODID:-//carddav-mcp//EN", f"UID:{uid}"]
     lines.append(_prop_line("FN", escape(fn)))
     lines.append(_prop_line("N", f"{escape(last_name or '')};{escape(first_name or '')};;;"))
@@ -847,7 +869,7 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         new_lines.append(_prop_line("N", ";".join(escape(x) for x in c[:5])))
         if fn is None:
             fn = ""
-    if fn is not None and not fn.strip():
+    if fn is not None and not _clean(fn):
         # FN is mandatory, and the address-book query filters on it: a card
         # without one would vanish from every tool. Derive it from the name,
         # then the organisation; failing both, the card keeps the FN it has.
@@ -855,7 +877,7 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         if org is None:
             cur_org = next((p for p in props if p.name == "ORG"), None)
             org = unescape(split_escaped(cur_org.value)[0]) if cur_org else ""
-        fn = " ".join(x.strip() for x in (c[1], c[0]) if x.strip()) or org.strip() or None
+        fn = _display_name(None, c[1], c[0], org) or None
     set_simple("FN", fn)
     if changes.get("organization") is not None:
         drop.add("ORG")
@@ -997,8 +1019,8 @@ def create_contact(full_name: str | None = None, first_name: str | None = None,
     c.put(target, vcard, create=True)
     return {"created": True, "uid": uid, "addressbook": book["name"],
             "href": urlparse(target).path,
-            "full_name": full_name or " ".join(x for x in (first_name, last_name) if x)
-                         or organization}
+            "full_name": _display_name(full_name, first_name, last_name, organization)
+                         or "Unnamed"}
 
 
 @mcp.tool()

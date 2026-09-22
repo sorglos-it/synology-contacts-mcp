@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.4 – 2026-09-22
+
+- Changing the phones or emails of a contact synced from an iPhone works again: types such as *cell, voice* or a label
+  like *Büro (Zentrale)* are split into single words instead of being refused, which 1.1.3 did. Characters that could
+  break out of the type are still dropped.
+- A mistyped port in the NAS address (`nas.local:50o1`) is reported as such instead of a bare *"Error executing
+  tool"*.
+- A display name of blanks or control characters counts as empty, so the card keeps a real one.
+
 ## 1.1.3 – 2026-09-22
 
 - **Certificate checking is on by default** (*Zertifikat prüfen*): it keeps the DSM password from being intercepted.
