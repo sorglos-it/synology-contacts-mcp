@@ -34,6 +34,8 @@ Contacts app installed, and the DSM user account that owns the address books.
 Install the new `.mcpb` the same way; it replaces the old one.
 **Once, for bundles built after 22 Sep 2026:** the author name changed, so Claude Desktop sees a new
 extension. Uninstall the old *Synology Contacts* extension first (*Settings → Extensions*), then install the new one and fill in the fields again.
+**From 1.1.3, *Zertifikat prüfen* is on.** A NAS still on its self-signed certificate needs a valid one (DSM →
+*Control Panel → Security → Certificate*, e.g. Let's Encrypt), or the switch goes off — on your own network only.
 
 ## Install uv
 
@@ -58,10 +60,10 @@ not see the new `PATH` and the extension stops at "server disconnected".
 | Field | Meaning |
 |---|---|
 | **NAS-Adresse** | Host name or IP only, e.g. `nas.example.com`. No `https://`, no path. A non-standard port goes here as `nas.example.com:8443`. |
-| **HTTPS verwenden** | On → `https`, default port 5001. Off → `http`, default port 5000. These are the DSM defaults. |
+| **HTTPS verwenden** | On → `https`, default port 5001. Off → `http`, default port 5000, and the password crosses the network unencrypted. These are the DSM defaults. |
 | **Benutzername** | DSM login name of the user who owns the address books |
 | **Passwort** | DSM password; stored in the OS keychain, never in the package |
-| **Zertifikat prüfen** | Leave **off** while the NAS uses its self-signed certificate. Turn on for a real certificate (e.g. Let's Encrypt). |
+| **Zertifikat prüfen** | **On** by default: the extension only talks to a NAS whose certificate is valid for the name entered above, so nobody in between can pose as the NAS and read the password. Needs a real certificate on the NAS (e.g. Let's Encrypt). Switch off only for a NAS on its self-signed certificate, and only on your own network. |
 | **Zeitlimit pro Anfrage** | Seconds allowed per request, default 45. Leave it alone unless the NAS is slow enough to run into it. |
 
 The labels are German because the extension manifest is; the fields behave exactly as described above.
@@ -79,7 +81,7 @@ getting that path wrong is what makes DSM answer with its login page, and the re
 | `search_contacts` | Search name, organisation, email, phone, note |
 | `get_contact` | One contact in full, by UID, href or display name |
 | `create_contact` | New contact, with several phone numbers, email addresses, organisation, birthday and categories |
-| `update_contact` | Change only the fields passed |
+| `update_contact` | Change only the fields passed; emails, phones and url replace every entry of that kind |
 | `delete_contact` | Delete a contact |
 
 - **Partial updates keep the rest** — an update rewrites only the fields you pass; photo, custom `X-` properties and
@@ -97,11 +99,15 @@ getting that path wrong is what makes DSM answer with its login page, and the re
 
 - **Runs locally.** The server talks to your NAS directly; nothing is sent to a third party. Claude Desktop stores the
   password in the OS keychain — there are no credentials in the package.
-- **Certificate checking off disables TLS verification** for the connection. Right for a self-signed NAS on your own
-  LAN, wrong over the open internet.
-- **`delete_contact` is permanent.** There is no CardDAV trash. Identify by UID rather than by name: part of a name
-  that fits several contacts is rejected, but if several contacts have exactly the same name, the first one found is
-  taken.
+- **Certificate checking protects the password.** It is on by default since 1.1.3. Switched off, anyone between your
+  computer and the NAS can pose as the NAS and read the DSM password — acceptable on your own LAN with a self-signed
+  NAS, wrong anywhere else. Certificates trusted by the operating system count too. A rejected certificate is reported
+  with the reason and both ways out.
+- **Namesakes are never guessed.** When a name fits several contacts — the same name twice, or a name that is also
+  part of others (*Müller* next to *Anna Müller*) — `get_contact`, `update_contact` and `delete_contact` stop and list
+  the candidates with address book, company, first email and phone. Claude then asks which one you mean and continues
+  with its UID. The same goes for one UID in two address books and for two address books with the same name.
+- **`delete_contact` is permanent.** There is no CardDAV trash.
 - **Shared address books are often read-only.** Synology hands out team books without write privileges;
   `list_addressbooks` shows `writable: false` for them, and a write attempt returns HTTP 403.
 - **Photos are never returned, and never written.** An update preserves an existing `PHOTO` untouched, but there is no
@@ -136,8 +142,8 @@ How it works:
 2. The server builds the endpoint from host name and protocol switch and appends `/carddav/`.
 3. Discovery follows the CardDAV chain — `current-user-principal`, then `addressbook-home-set`, then a `Depth: 1`
    PROPFIND for the books, including `current-user-privilege-set` to tell writable books from read-only ones.
-4. Contacts are fetched per book with a single `addressbook-query` REPORT and cached for 60 seconds, so a search does
-   not re-download the whole book.
+4. Contacts are fetched per book with a single `addressbook-query` REPORT and cached for 60 seconds without their
+   photos, so a search does not re-download the whole book.
 5. vCards are parsed in-house (line unfolding, escaped separators, quoted parameters) and reduced to compact JSON.
    Writes go back as vCard 3.0 with `If-Match` / `If-None-Match`, so a concurrent change fails loudly instead of
    silently overwriting.
@@ -154,7 +160,7 @@ uv run --script apps/server/server.py
 | `CARDDAV_HTTPS` | `true` (default) → https + port 5001, `false` → http + port 5000 |
 | `CARDDAV_USERNAME` | DSM login name |
 | `CARDDAV_PASSWORD` | DSM password |
-| `CARDDAV_VERIFY_SSL` | `false` for a self-signed certificate |
+| `CARDDAV_VERIFY_SSL` | `true` (default) checks the certificate; `false` only for a self-signed NAS on your own network |
 | `CARDDAV_TIMEOUT` | Seconds per HTTP request, default `45`. Blank or unparsable falls back to the default. |
 | `CARDDAV_BASE_URL` | Legacy: a complete endpoint URL, wins over `CARDDAV_HOST` |
 

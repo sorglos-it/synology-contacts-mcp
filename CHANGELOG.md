@@ -1,7 +1,31 @@
 # Changelog
 
-## Unreleased – 2026-09-22
+## 1.1.3 – 2026-09-22
 
+- **Certificate checking is on by default** (*Zertifikat prüfen*): it keeps the DSM password from being intercepted.
+  A NAS still on its self-signed certificate needs a valid one (e.g. Let's Encrypt) or the switch turned off — on your
+  own network only. A rejected certificate is reported with the reason and both ways out instead of a bare OpenSSL
+  message.
+  Certificates trusted by the operating system count as well, not only the built-in list.
+- **Namesakes are no longer guessed.** A name that fits several contacts — the same name twice, or a name that is also
+  part of others (*Müller* next to *Anna Müller*) — used to resolve to the first or the exact match, so
+  `delete_contact` could remove the wrong person. `get_contact`, `update_contact` and `delete_contact` now list the
+  candidates, and Claude asks which one is meant. The same holds for one UID in two address books and for two address
+  books with the same name.
+- **Error messages reach Claude.** The MCP SDK passes on only errors of its own `ToolError` type; everything else
+  arrived as a bare *"Error executing tool …"*, so Claude could neither name the cause (password, read-only book,
+  certificate) nor ask which contact was meant.
+- **No more vCard injection:** a phone or email type has to be one word (home, work, cell …), and a line break inside
+  any value stays inside that value. Before, a type or note with a line break could add properties of its own.
+- An empty identifier is refused. Before, it matched the first contact without a UID or name.
+- `update_contact` never removes the display name (FN) — a card without one vanished from every tool. It reads back
+  the card it wrote instead of looking it up again, and a vCard 4.0 card stays 4.0.
+- A change answered with a redirect is reported as an error instead of passing for a success that never happened.
+  After a *412*, the next attempt re-reads the contact instead of sending the stale ETag again.
+- Photos are no longer held in the cache (up to 30 KB each). Address books on servers that do not report privileges
+  show `writable` as unknown instead of false. A legacy `CARDDAV_BASE_URL` with `user:password@` no longer puts the
+  password into error messages.
+- The **HTTPS verwenden** description says that switching it off sends the password unencrypted.
 - Author is now „Sorglos Thomas Weirich“. Claude Desktop derives the extension's identity from it:
   uninstall the old extension once before installing this version, then enter the settings again.
 - Project layout follows the project standard: the server lives in `apps/server/` (`server.py`, `manifest.json`,

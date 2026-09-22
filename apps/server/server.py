@@ -14,7 +14,8 @@ Config via environment:
   CARDDAV_HTTPS       "true"/"false" (default true) - picks scheme and default port
   CARDDAV_USERNAME
   CARDDAV_PASSWORD
-  CARDDAV_VERIFY_SSL  "true"/"false" (default true; Synology self-signed -> false)
+  CARDDAV_VERIFY_SSL  "true"/"false" (default true - it keeps the password safe;
+                      false only for a self-signed NAS on the home network)
   CARDDAV_TIMEOUT     seconds allowed per HTTP request (default 45)
 
   CARDDAV_BASE_URL    legacy: a complete endpoint URL. Still honoured, and wins
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import ssl
 import time
 import uuid
 import datetime as dt
@@ -35,6 +37,7 @@ from urllib.parse import urljoin, urlparse, unquote
 import httpx
 from pydantic import BaseModel
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 # --------------------------------------------------------------------------
 # config
@@ -153,7 +156,14 @@ def unescape(v: str) -> str:
     return "".join(out)
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
 def escape(v: str) -> str:
+    """Escape a text value. Every kind of line break becomes the escaped \\n -
+    a bare CR would end the line on the server and start a property of the
+    caller's choosing - and other control characters are dropped."""
+    v = _CONTROL.sub("", v.replace("\r\n", "\n").replace("\r", "\n"))
     return (v.replace("\\", "\\\\").replace(";", "\\;")
              .replace(",", "\\,").replace("\n", "\\n"))
 
@@ -227,6 +237,21 @@ def parse_prop(line: str) -> Prop | None:
         vals = [x.strip().strip('"') for x in _split_unquoted(v, ",")]
         params.setdefault(k.strip().upper(), []).extend([x for x in vals if x])
     return Prop(group, name.upper(), params, value, line)
+
+
+def slim(raw: str) -> str:
+    """A card without its blobs, for the cache. summarize() never shows them,
+    and one Synology photo is 30 KB of base64; a PHOTO leaves an empty marker
+    so has_photo still works. Writes always GET the full card first."""
+    out = []
+    for line in unfold(raw).split("\n"):
+        name = line.split(":", 1)[0].split(";", 1)[0].rsplit(".", 1)[-1].upper()
+        if name in NOISE_PROPS:
+            if name == "PHOTO":
+                out.append("PHOTO:")
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def parse_vcard(raw: str) -> list[Prop]:
@@ -342,8 +367,36 @@ def summarize(props: list[Prop], href: str = "", etag: str = "",
 # CardDAV client
 # --------------------------------------------------------------------------
 
-class CardDavError(RuntimeError):
-    pass
+class CardDavError(ToolError):
+    """A failure Claude has to read: the SDK passes only ToolError text on.
+    Anything else reaches the model as a bare "Error executing tool <name>" -
+    no candidate list to ask about, no hint what to fix."""
+
+
+def _cert_error(e: BaseException | None) -> ssl.SSLCertVerificationError | None:
+    """The certificate failure behind an httpx error, if that is what it is.
+    httpx wraps it twice (httpcore, then httpx), so walk the chain."""
+    seen: set[int] = set()
+    while e is not None and id(e) not in seen:
+        if isinstance(e, ssl.SSLCertVerificationError):
+            return e
+        seen.add(id(e))
+        e = e.__cause__ or e.__context__
+    return None
+
+
+def _tls() -> ssl.SSLContext:
+    """What certificate checking trusts: the system's certificate store plus
+    certifi's bundle. httpx alone knows only certifi, so a NAS certificate the
+    user trusted in the operating system would still be refused; certifi keeps
+    Mozilla's roots for Pythons that do not read the system store (macOS)."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi  # installed with httpx
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, OSError):
+        pass
+    return ctx
 
 
 def compose_base_url(host: str, https: bool) -> str:
@@ -373,7 +426,10 @@ def compose_base_url(host: str, https: bool) -> str:
 class Client:
     def __init__(self):
         if BASE_URL:
-            self.base = BASE_URL if BASE_URL.endswith("/") else BASE_URL + "/"
+            # user:pass@ in the legacy URL would end up in every error message
+            pr = urlparse(BASE_URL)
+            base = pr._replace(netloc=pr.netloc.rsplit("@", 1)[-1]).geturl()
+            self.base = base if base.endswith("/") else base + "/"
             # A bare host is the classic misconfiguration of the legacy URL
             # field: DSM then answers the PROPFIND with its login page, and the
             # HTML entities in it produce a baffling "undefined entity" parse
@@ -392,7 +448,7 @@ class Client:
         self.origin = f"{pr.scheme}://{pr.netloc}"
         self._http = httpx.Client(
             auth=httpx.BasicAuth(USERNAME, PASSWORD),
-            verify=VERIFY_SSL,
+            verify=_tls() if VERIFY_SSL else False,
             timeout=httpx.Timeout(TIMEOUT),
             headers={"User-Agent": "carddav-mcp/1.0"},
             follow_redirects=True,
@@ -415,10 +471,28 @@ class Client:
             headers["Content-Type"] = content_type
         if extra:
             headers.update(extra)
+        # Writes never follow a redirect: httpx repeats a PUT or DELETE that
+        # was answered with 302 as a GET, and the GET's 200 would then pass
+        # for a successful delete while the card stays where it was.
+        write = method in ("PUT", "DELETE")
         try:
             r = self._http.request(method, url, content=body.encode("utf-8") if body else None,
-                                   headers=headers)
+                                   headers=headers, follow_redirects=not write)
         except httpx.HTTPError as e:
+            # Certificate checking is on by default, so a NAS still on its
+            # self-signed certificate lands here - with an OpenSSL message
+            # that names neither the cause nor the way out.
+            cert = _cert_error(e)
+            if cert is not None:
+                raise CardDavError(
+                    f"The certificate of {self.origin} was not accepted: "
+                    f"{cert.verify_message or cert}. Certificate checking keeps "
+                    "the DSM password from being intercepted. Fix it on the NAS: "
+                    "a valid certificate (DSM > Control Panel > Security > "
+                    "Certificate, e.g. Let's Encrypt), and the name it was issued "
+                    "for as NAS address. Only on your own home network: switch off "
+                    "\"Zertifikat prüfen\" in the extension settings."
+                ) from e
             raise CardDavError(f"{method} {url} failed: {e}") from e
         if r.status_code == 401:
             raise CardDavError(
@@ -432,12 +506,19 @@ class Client:
                 "(shared books often are) - use a writable one."
             )
         if r.status_code == 412:
+            self._cache.clear()  # or the retry sends the same stale ETag
             raise CardDavError(
                 "Precondition failed (412): the contact changed on the server "
                 "since it was read, or it already exists. Re-read and retry."
             )
         if r.status_code >= 400:
             raise CardDavError(f"{method} {url} -> HTTP {r.status_code}: {r.text[:300]}")
+        if write and r.is_redirect:
+            raise CardDavError(
+                f"{method} {url} was redirected (HTTP {r.status_code} to "
+                f"{r.headers.get('Location', '?')}) and not carried out. "
+                "Check the NAS address and the HTTPS switch."
+            )
         return r
 
     def _xml(self, r: httpx.Response) -> ET.Element:
@@ -509,7 +590,11 @@ class Client:
             href = href_el.text
             if not name:
                 name = unquote(href.rstrip("/").rsplit("/", 1)[-1])
-            privs = resp.find(f".//{{{DAV}}}current-user-privilege-set")
+            # only a 2xx propstat counts: a server without ACL support lists
+            # the property empty under 404, which is not "read-only"
+            privs = next((p for ps in resp.findall(f"{{{DAV}}}propstat")
+                          if re.search(r"\s2\d\d\b", ps.findtext(f"{{{DAV}}}status") or " 200 ")
+                          for p in ps.iter(f"{{{DAV}}}current-user-privilege-set")), None)
             if privs is None:
                 writable = None  # server did not report privileges
             else:
@@ -523,20 +608,37 @@ class Client:
         return books
 
     def resolve_book(self, ref: str | None) -> dict[str, str]:
+        """One address book by name, href or URL; the first one without a ref.
+
+        A ref that fits several books is refused, not guessed: shared books
+        from other DSM users often carry the same name as one's own.
+        """
         books = self.addressbooks()
+        ref = (ref or "").strip()
         if not ref:
             return books[0]
-        low = ref.strip().lower()
-        for b in books:
-            if b["name"].lower() == low or b["href"] == ref or b["url"] == ref:
-                return b
-        for b in books:
-            if low in b["name"].lower() or low in b["href"].lower():
-                return b
+        low = ref.lower()
+        hits = ([b for b in books
+                 if b["name"].lower() == low or b["href"] == ref or b["url"] == ref]
+                or [b for b in books
+                    if low in b["name"].lower() or low in b["href"].lower()])
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            raise CardDavError(
+                f"{ref!r} fits {len(hits)} address books: "
+                + ", ".join(f"{b['name']!r} (href {b['href']})" for b in hits)
+                + ". Do not pick one yourself: ask the user which one is meant, "
+                "then pass its href."
+            )
         raise CardDavError(
             f"Address book {ref!r} not found. Available: "
             + ", ".join(repr(b["name"]) for b in books)
         )
+
+    def books_for(self, ref: str | None) -> list[dict[str, str]]:
+        """The book a ref names, or all of them when there is none."""
+        return [self.resolve_book(ref)] if (ref or "").strip() else self.addressbooks()
 
     # -- reading -----------------------------------------------------------
 
@@ -564,7 +666,7 @@ class Client:
             items.append({
                 "href": href_el.text,
                 "etag": (etag_el.text or "") if etag_el is not None else "",
-                "raw": data_el.text,
+                "raw": slim(data_el.text),
             })
         self._cache[key] = (now, items)
         return items
@@ -589,27 +691,67 @@ class Client:
         self._cache.clear()
 
     def find(self, ident: str, book_ref: str | None = None) -> tuple[dict, dict]:
-        """Locate one contact by UID, href, or exact//partial display name."""
-        books = [self.resolve_book(book_ref)] if book_ref else self.addressbooks()
-        ident_l = ident.strip().lower()
-        partial = []
-        for b in books:
+        """Locate exactly one contact by UID, href, or (part of) the display name.
+
+        Never guesses. When several contacts fit - the same name twice, one UID
+        in two books, or a name that is also part of other names - it raises
+        with the candidates so the user can say which one is meant. Taking the
+        first hit is how a delete by name removes the wrong person.
+        """
+        ident = ident.strip()
+        if not ident:
+            # "" would equal the UID of every contact that has none
+            raise CardDavError("No contact given: pass its uid, href or name.")
+        ident_l = ident.lower()
+        target = unquote(self.abs(ident))
+        by_id, by_name = [], []
+        uids: dict[str, int] = {}
+        for b in self.books_for(book_ref):
             for it in self.fetch_all(b):
-                props = parse_vcard(it["raw"])
-                s = summarize(props, it["href"], it["etag"], full=True)
-                if (s.get("uid", "").lower() == ident_l
-                        or it["href"] == ident
-                        or it["href"].rsplit("/", 1)[-1].lower() == ident_l
-                        or s.get("full_name", "").lower() == ident_l):
-                    return s, it
-                if ident_l and ident_l in s.get("full_name", "").lower():
-                    partial.append((s, it))
-        if len(partial) == 1:
-            return partial[0]
-        if len(partial) > 1:
-            names = ", ".join(repr(p[0].get("full_name")) for p in partial[:8])
-            raise CardDavError(f"{ident!r} is ambiguous, matches: {names}. Use the uid.")
+                s = summarize(parse_vcard(it["raw"]), it["href"], it["etag"], full=True)
+                s["addressbook"] = b["name"]
+                uid = s.get("uid", "").lower()
+                uids[uid] = uids.get(uid, 0) + 1
+                if (uid == ident_l
+                        or unquote(self.abs(it["href"])) == target
+                        or it["href"].rsplit("/", 1)[-1].lower() == ident_l):
+                    by_id.append((s, it))
+                elif ident_l in s.get("full_name", "").lower():
+                    by_name.append((s, it))
+        # An exact name does not outvote the names that contain it: "Müller"
+        # must not quietly mean the company while Anna and Hans Müller exist.
+        by_name.sort(key=lambda h: h[0].get("full_name", "").lower() != ident_l)
+        for hits in (by_id, by_name):
+            if len(hits) == 1:
+                return hits[0]
+            if hits:
+                raise CardDavError(_ambiguous(ident, hits, uids))
         raise CardDavError(f"No contact matching {ident!r}.")
+
+
+def _ambiguous(ident: str, hits: list[tuple[dict, dict]],
+               uids: dict[str, int]) -> str:
+    """Error text for a lookup that fits several contacts.
+
+    Lists what tells them apart and, per contact, an identifier that is unique
+    among all contacts searched: the UID, or the href when the UID repeats (the
+    same card in two books), so the follow-up call does not hit the same wall.
+    """
+    rows = []
+    for s, _ in hits[:10]:
+        uid = s.get("uid", "")
+        key = uid if uid and uids.get(uid.lower()) == 1 else s["href"]
+        detail = [s.get("organization", "")]
+        detail += [e["value"] for e in s.get("emails", [])[:1]]
+        detail += [p["value"] for p in s.get("phones", [])[:1]]
+        detail = ", ".join(d for d in detail if d)
+        rows.append(f"- {s.get('full_name')}" + (f" ({detail})" if detail else "")
+                    + f", address book {s['addressbook']!r}, identifier {key}")
+    if len(hits) > 10:
+        rows.append(f"- ... and {len(hits) - 10} more; ask the user for more of the name")
+    return (f"{ident!r} fits {len(hits)} contacts:\n" + "\n".join(rows)
+            + "\nDo not pick one yourself: ask the user which contact is meant, "
+              "then call again with its identifier.")
 
 
 _client: Client | None = None
@@ -631,8 +773,17 @@ class ContactField(BaseModel):
     type: str = "home"
 
 
+_TYPE = re.compile(r"[^\W_][\w-]{0,29}")
+
+
 def _prop_line(name: str, value: str, types: Iterable[str] = ()) -> str:
-    tp = "".join(f";TYPE={t}" for t in types if t)
+    types = [t.strip() for t in types if t and t.strip()]
+    for t in types:
+        # a type goes into the parameter unescaped: ":" or a line break in it
+        # would write vCard syntax of the caller's choosing
+        if not _TYPE.fullmatch(t):
+            raise CardDavError(f"Invalid type {t!r}: use one word, such as home, work or cell.")
+    tp = "".join(f";TYPE={t.upper()}" for t in types)
     return fold(f"{name}{tp}:{value}")
 
 
@@ -653,9 +804,9 @@ def build_vcard(uid: str, *, full_name: str | None = None,
     if job_title:
         lines.append(_prop_line("TITLE", escape(job_title)))
     for e in emails or []:
-        lines.append(_prop_line("EMAIL", escape(e.value), ["INTERNET", e.type.upper()]))
+        lines.append(_prop_line("EMAIL", escape(e.value), ["INTERNET", e.type]))
     for p in phones or []:
-        lines.append(_prop_line("TEL", escape(p.value), [p.type.upper()]))
+        lines.append(_prop_line("TEL", escape(p.value), [p.type]))
     if url:
         lines.append(_prop_line("URL", escape(url)))
     if birthday:
@@ -684,10 +835,10 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
 
     fn = changes.get("full_name")
     first, last = changes.get("first_name"), changes.get("last_name")
+    cur = next((p for p in props if p.name == "N"), None)
+    c = [unescape(x) for x in split_escaped(cur.value)] if cur else []
+    c += [""] * (5 - len(c))
     if first is not None or last is not None:
-        cur = next((p for p in props if p.name == "N"), None)
-        c = [unescape(x) for x in split_escaped(cur.value)] if cur else []
-        c += [""] * (5 - len(c))
         if last is not None:
             c[0] = last
         if first is not None:
@@ -695,7 +846,16 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         drop.add("N")
         new_lines.append(_prop_line("N", ";".join(escape(x) for x in c[:5])))
         if fn is None:
-            fn = " ".join(x for x in (c[1], c[0]) if x)
+            fn = ""
+    if fn is not None and not fn.strip():
+        # FN is mandatory, and the address-book query filters on it: a card
+        # without one would vanish from every tool. Derive it from the name,
+        # then the organisation; failing both, the card keeps the FN it has.
+        org = changes.get("organization")
+        if org is None:
+            cur_org = next((p for p in props if p.name == "ORG"), None)
+            org = unescape(split_escaped(cur_org.value)[0]) if cur_org else ""
+        fn = " ".join(x.strip() for x in (c[1], c[0]) if x.strip()) or org.strip() or None
     set_simple("FN", fn)
     if changes.get("organization") is not None:
         drop.add("ORG")
@@ -713,12 +873,13 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
     if changes.get("emails") is not None:
         drop.add("EMAIL")
         for e in changes["emails"]:
-            new_lines.append(_prop_line("EMAIL", escape(e.value), ["INTERNET", e.type.upper()]))
+            new_lines.append(_prop_line("EMAIL", escape(e.value), ["INTERNET", e.type]))
     if changes.get("phones") is not None:
         drop.add("TEL")
         for p in changes["phones"]:
-            new_lines.append(_prop_line("TEL", escape(p.value), [p.type.upper()]))
+            new_lines.append(_prop_line("TEL", escape(p.value), [p.type]))
 
+    version = next((p.value.strip() for p in props if p.name == "VERSION"), "") or "3.0"
     kept = []
     for p in props:
         if p.name in ("BEGIN", "END", "REV"):
@@ -728,9 +889,9 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         kept.append(p.raw)
     rev = f"REV:{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
     body = ["BEGIN:VCARD"] + kept + new_lines + [rev, "END:VCARD"]
-    # VERSION must directly follow BEGIN
+    # VERSION must directly follow BEGIN; a 4.0 card stays 4.0
     body = [b for b in body if not b.startswith("VERSION:")]
-    body.insert(1, "VERSION:3.0")
+    body.insert(1, f"VERSION:{version}")
     return "\r\n".join(fold(b) if len(b.encode()) > 75 and "\n" not in b else b
                        for b in body) + "\r\n"
 
@@ -778,7 +939,7 @@ def search_contacts(query: str, addressbook: str | None = None,
                     limit: int = 25) -> dict:
     """Search contacts by name, organisation, email, phone or note."""
     c = client()
-    books = [c.resolve_book(addressbook)] if addressbook else c.addressbooks()
+    books = c.books_for(addressbook)
     q = query.strip().lower()
     digits = re.sub(r"\D", "", q)
     hits = []
@@ -805,7 +966,10 @@ def search_contacts(query: str, addressbook: str | None = None,
 
 @mcp.tool()
 def get_contact(identifier: str, addressbook: str | None = None) -> dict:
-    """Full detail for one contact, found by UID, href or display name."""
+    """Full detail for one contact, found by UID, href or display name.
+
+    A name that fits several contacts is not guessed: the error lists them.
+    """
     s, _ = client().find(identifier, addressbook)
     return s
 
@@ -848,7 +1012,8 @@ def update_contact(identifier: str, full_name: str | None = None,
                    addressbook: str | None = None) -> dict:
     """Update a contact. Only supplied fields change; photo and other data are kept.
 
-    Passing emails/phones replaces the whole list for that kind.
+    Passing emails, phones or url replaces every entry of that kind. A name
+    that fits several contacts is not guessed: the error lists them.
     """
     c = client()
     summary, item = c.find(identifier, addressbook)
@@ -862,18 +1027,27 @@ def update_contact(identifier: str, full_name: str | None = None,
         raise CardDavError("No fields given to update.")
     new = patch_vcard(raw, changes)
     c.put(c.abs(item["href"]), new, etag=etag or item.get("etag") or None)
-    s2, _ = c.find(summary.get("uid") or identifier, addressbook)
+    # read back the very card just written - a new lookup by UID or name
+    # could land on a namesake
+    raw, etag = c.get_raw(item["href"])
+    s2 = summarize(parse_vcard(raw), item["href"], etag, full=True)
+    s2["addressbook"] = summary["addressbook"]
     return {"updated": True, "contact": s2}
 
 
 @mcp.tool()
 def delete_contact(identifier: str, addressbook: str | None = None) -> dict:
-    """Permanently delete a contact. Identify precisely (UID preferred)."""
+    """Permanently delete a contact. Identify precisely (UID preferred).
+
+    A name that fits several contacts is not guessed: the error lists them,
+    and the user has to say which one goes.
+    """
     c = client()
     summary, item = c.find(identifier, addressbook)
     c.delete(c.abs(item["href"]), etag=item.get("etag") or None)
     return {"deleted": True, "uid": summary.get("uid"),
-            "full_name": summary.get("full_name")}
+            "full_name": summary.get("full_name"),
+            "addressbook": summary["addressbook"]}
 
 
 if __name__ == "__main__":
