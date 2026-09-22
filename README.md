@@ -155,7 +155,7 @@ Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE) — © 2026 Thomas Weirich.
+This project is licensed under the [MIT License](LICENSE) — © 2026 Sorglos Thomas Weirich.
 
 ## Donate via PayPal
 
