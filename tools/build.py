@@ -9,9 +9,11 @@ It needs nothing but Python 3.8 or newer - no Node.js, no npx, no download.
 The same sources always give the same file: entries are sorted and carry a
 fixed timestamp.
 
-Before packing it checks what Claude Desktop relies on: manifest.json and
-VERSION name the same version, the entry point and every ${__dirname} path of
-the start command exist, and the icon is a PNG inside the bundle.
+Before packing it checks what Claude Desktop relies on: manifest.json, VERSION
+and package.json (if there is one) name the same version, the entry point and
+every ${__dirname} path of the start command exist, the icon is a PNG inside
+the bundle, and every package.json with dependencies has them installed next
+to it in node_modules/.
 """
 from __future__ import annotations
 
@@ -26,11 +28,14 @@ ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "apps" / "server"
 DIST = ROOT / "dist"
 ROOT_FILES = ("README.md", "LICENSE", "THIRD-PARTY.md")
-# Left out: repository metadata, caches and what `mcpb pack` leaves out as well.
-SKIP_FILES = ("VERSION", "Thumbs.db", ".DS_Store", ".git*", ".mcpbignore", ".env*",
-              "*.log", "*.map", "*.mcpb", "*.pyc", "*.d.ts", "*.tsbuildinfo",
-              "package-lock.json", "yarn.lock", "tsconfig.json")
-SKIP_DIRS = ("__pycache__", ".git", "node_modules")
+# Left out: apps/server/VERSION, caches, command shims (.bin) and everything
+# `mcpb pack` leaves out by default.
+SKIP_FILES = ("*.pyc", ".DS_Store", "Thumbs.db", ".gitignore", ".mcpbignore", "*.log",
+              ".env*", ".npmrc", ".yarnrc", ".eslintrc", ".editorconfig", ".prettierrc",
+              ".prettierignore", ".eslintignore", ".nycrc", ".babelrc", ".pnp.*", "*.map",
+              "npm-debug.log*", "yarn-debug.log*", "yarn-error.log*", "package-lock.json",
+              "yarn.lock", "*.mcpb", "*.d.ts", "*.tsbuildinfo", "tsconfig.json")
+SKIP_DIRS = ("__pycache__", ".git", ".npm", ".yarn", ".bin", ".cache")
 STAMP = (1980, 1, 1, 0, 0, 0)
 PNG = b"\x89PNG\r\n\x1a\n"
 DIRNAME = "${__dirname}/"
@@ -48,11 +53,25 @@ def inside_app(relative: str) -> Path:
     return APP / Path(*pure.parts)
 
 
-def check(manifest: dict) -> None:
+def read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        fail(f"cannot read {path.relative_to(ROOT).as_posix()}: {error}")
+    return {}
+
+
+def check_versions(manifest: dict) -> None:
     version_file = APP / "VERSION"
     version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else ""
     if not version or manifest.get("version") != version:
         fail(f"version differs: manifest.json {manifest.get('version')!r}, VERSION {version!r}")
+    package = APP / "package.json"
+    if package.is_file() and read_json(package).get("version") != version:
+        fail(f"version differs: package.json {read_json(package).get('version')!r}, VERSION {version!r}")
+
+
+def check_start(manifest: dict) -> None:
     if not manifest.get("name"):
         fail("manifest.json has no name")
     server = manifest.get("server") or {}
@@ -69,13 +88,25 @@ def check(manifest: dict) -> None:
             fail(f"icon missing or not a PNG: {icon}")
 
 
+def check_dependencies() -> None:
+    for package in sorted(APP.rglob("package.json")):
+        if "node_modules" in package.relative_to(APP).parts:
+            continue
+        folder = package.parent
+        for name in read_json(package).get("dependencies") or {}:
+            if not (folder / "node_modules" / name / "package.json").is_file():
+                where = folder.relative_to(ROOT).as_posix()
+                fail(f"{name} is missing in {where}/node_modules - run: "
+                     f"npm install --prefix {where} --omit=dev --ignore-scripts")
+
+
 def collect() -> list[tuple[str, Path]]:
     entries = []
-    for path in sorted(APP.rglob("*")):
+    for path in APP.rglob("*"):
         relative = path.relative_to(APP)
         if not path.is_file() or any(part in SKIP_DIRS for part in relative.parts):
             continue
-        if any(fnmatch(path.name, pattern) for pattern in SKIP_FILES):
+        if relative.as_posix() == "VERSION" or any(fnmatch(path.name, p) for p in SKIP_FILES):
             continue
         entries.append((relative.as_posix(), path))
     for name in ROOT_FILES:
@@ -84,15 +115,14 @@ def collect() -> list[tuple[str, Path]]:
     names = [name for name, _ in entries]
     if len(names) != len(set(names)):
         fail("apps/server contains a file with the name of a root file (README.md, LICENSE ...)")
-    return entries
+    return sorted(entries)
 
 
 def main() -> None:
-    try:
-        manifest = json.loads((APP / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        fail(f"cannot read apps/server/manifest.json: {error}")
-    check(manifest)
+    manifest = read_json(APP / "manifest.json")
+    check_versions(manifest)
+    check_start(manifest)
+    check_dependencies()
     entries = collect()
     DIST.mkdir(exist_ok=True)
     target = DIST / f"{manifest['name']}-{manifest['version']}.mcpb"
