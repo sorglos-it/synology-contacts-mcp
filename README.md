@@ -6,9 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Donate](https://img.shields.io/badge/Donate-PayPal-00457C.svg?logo=paypal)](https://www.paypal.com/donate/?hosted_button_id=6CDEVZGJWTNQQ)
 
-Lets **Claude** use the **Contacts app of your Synology NAS** — or any other CardDAV server: search the address book,
+Lets **Claude** use the **Contacts app of your Synology NAS**: search the address book,
 read a contact in full, create, change and delete entries, straight from a conversation. A Claude Desktop extension
-in a single `.mcpb` file that runs on your computer and talks to your NAS only.
+in a single `.mcpb` file that runs on your computer and talks to your NAS only. Other CardDAV servers work only if
+they use the same path, `/carddav/` — it is fixed, not detected.
 
 | Folder | Purpose | Language | Start | Build |
 |---|---|---|---|---|
@@ -83,9 +84,10 @@ getting that path wrong is what makes DSM answer with its login page, and the re
 
 - **Partial updates keep the rest** — an update rewrites only the fields you pass; photo, custom `X-` properties and
   Apple label groups survive untouched.
-- **Phone search that works** — searching `017012345678` also finds `+49 170 1234 5678`; digits are compared,
-  formatting is ignored.
-- **Apple label groups understood** — `item1.TEL` + `item1.X-ABLabel:_$!<Home>!$_` is read back as a plain `home`.
+- **Phone search ignores formatting** — with four or more digits in the query, the digits are compared as a piece of
+  the number: `170 1234-5678` finds `+49 170 1234 5678` and `0170 12345678`. `0` and `+49` are not converted into
+  each other, so `017012345678` does not find `+49 170 1234 5678` — leave out the leading `0` or `+49`.
+- **Apple label groups understood** — `item1.TEL` + `item1.X-ABLabel:_$!<Home>!$_` is read back as a plain `Home`.
 - **Read-only books are marked** — `writable` comes from the server's own privilege set, so a shared team book is
   visible as such before a write fails.
 - **No photo blobs.** A single Synology vCard can carry a 30 KB base64 JPEG, and sixty of them would fill the model's
@@ -97,8 +99,9 @@ getting that path wrong is what makes DSM answer with its login page, and the re
   password in the OS keychain — there are no credentials in the package.
 - **Certificate checking off disables TLS verification** for the connection. Right for a self-signed NAS on your own
   LAN, wrong over the open internet.
-- **`delete_contact` is permanent.** There is no CardDAV trash. Identify by UID rather than by name; an ambiguous name
-  is rejected rather than guessed.
+- **`delete_contact` is permanent.** There is no CardDAV trash. Identify by UID rather than by name: part of a name
+  that fits several contacts is rejected, but if several contacts have exactly the same name, the first one found is
+  taken.
 - **Shared address books are often read-only.** Synology hands out team books without write privileges;
   `list_addressbooks` shows `writable: false` for them, and a write attempt returns HTTP 403.
 - **Photos are never returned, and never written.** An update preserves an existing `PHOTO` untouched, but there is no
