@@ -8,16 +8,16 @@
   "author": {
     "name": "Thomas Weirich"
   },
-  "icon": "icon.png",
+  "icon": "assets/icon.png",
   "server": {
     "type": "python",
-    "entry_point": "server/server.py",
+    "entry_point": "server.py",
     "mcp_config": {
       "command": "uv",
       "args": [
         "run",
         "--script",
-        "${__dirname}/server/server.py"
+        "${__dirname}/server.py"
       ],
       "env": {
         "CARDDAV_HOST": "${user_config.host}",

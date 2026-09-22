@@ -1,5 +1,29 @@
+# Erzeugtes
+dist/
+bin/
+obj/
+.pio/
 __pycache__/
 *.pyc
 *.mcpb
-.DS_Store
+node_modules/
+
+# Laufzeitdaten - Ausnahme: Firmware-Dateisystem
+apps/*/data/
+!apps/firmware*/data/
+
+# Echte Konfiguration und Secrets - nur *.example kommt ins Repo
+apps/*/config/*
+!apps/*/config/*.example
+apps/firmware*/include/config.h
+.env
+.env.*
+
+# Fremdcode per Paketmanager
+apps/*/vendor/
+
+# Protokolle der Editor-Hooks, Betriebssystem
+receipts/
+review-receipts/
 Thumbs.db
+.DS_Store
