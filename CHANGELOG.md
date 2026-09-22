@@ -2,6 +2,8 @@
 
 ## Unreleased – 2026-09-22
 
+- Author is now „Sorglos Thomas Weirich“. Claude Desktop derives the extension's identity from it:
+  uninstall the old extension once before installing this version, then enter the settings again.
 - Project layout follows the project standard: the server lives in `apps/server/` (`server.py`, `manifest.json`,
   `assets/icon.png`, `VERSION`).
 - Inside the `.mcpb`, `server.py` now sits at the top level and the icon in `assets/`; settings and tools are

@@ -28,6 +28,12 @@ Contacts app installed, and the DSM user account that owns the address books.
    something like *"which address books do I have?"*. The first start takes a moment while uv fetches the
    dependencies.
 
+## Update
+
+Install the new `.mcpb` the same way; it replaces the old one.
+**Once, for bundles built after 22 Sep 2026:** the author name changed, so Claude Desktop sees a new
+extension. Uninstall the old *Synology Contacts* extension first (*Settings → Extensions*), then install the new one and fill in the fields again.
+
 ## Install uv
 
 uv fetches Python and the two libraries the server needs (`mcp`, `httpx`) on first start, so the `.mcpb` stays a few
