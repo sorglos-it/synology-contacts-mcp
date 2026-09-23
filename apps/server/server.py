@@ -666,7 +666,9 @@ class Client:
             href_el = resp.find(f"{{{DAV}}}href")
             data_el = resp.find(f".//{{{CARD}}}address-data")
             etag_el = resp.find(f".//{{{DAV}}}getetag")
-            if href_el is None or data_el is None or not (data_el.text or "").strip():
+            # a response without an href cannot be addressed later on
+            if (href_el is None or not (href_el.text or "").strip()
+                    or data_el is None or not (data_el.text or "").strip()):
                 continue
             items.append({
                 "href": href_el.text,
@@ -860,6 +862,8 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
     cur = next((p for p in props if p.name == "N"), None)
     c = [unescape(x) for x in split_escaped(cur.value)] if cur else []
     c += [""] * (5 - len(c))
+    old_name = _display_name(None, c[1], c[0], None)
+    old_fn = _clean(next((unescape(p.value) for p in props if p.name == "FN"), ""))
     if first is not None or last is not None:
         if last is not None:
             c[0] = last
@@ -868,7 +872,10 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         drop.add("N")
         new_lines.append(_prop_line("N", ";".join(escape(x) for x in c[:5])))
         if fn is None:
-            fn = ""
+            # A display name that is not simply the first and last name was
+            # chosen deliberately - a company, a card with a title - and a new
+            # first name must not overwrite it.
+            fn = "" if old_fn == old_name else None
     if fn is not None and not _clean(fn):
         # FN is mandatory, and the address-book query filters on it: a card
         # without one would vanish from every tool. Derive it from the name,
@@ -1006,8 +1013,9 @@ def create_contact(full_name: str | None = None, first_name: str | None = None,
                    url: str | None = None, categories: list[str] | None = None,
                    addressbook: str | None = None) -> dict:
     """Create a contact. birthday is YYYY-MM-DD. Field type e.g. home/work/cell."""
-    if not any([full_name, first_name, last_name, organization]):
-        raise CardDavError("Provide at least full_name, first/last_name or organization.")
+    if not _display_name(full_name, first_name, last_name, organization):
+        raise CardDavError("Provide at least full_name, first/last_name or organization - "
+                           "blanks and control characters do not count as a name.")
     c = client()
     book = c.resolve_book(addressbook)
     uid = str(uuid.uuid4()).upper()

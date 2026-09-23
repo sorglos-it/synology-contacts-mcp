@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.5 – 2026-09-23
+
+- A display name that is not simply first and last name — a company, a name with a title — is no longer overwritten
+  when a first or last name is set. `update_contact("ACME GmbH", first_name="Hans")` used to rename the card to
+  *Hans*, and the company was gone from every list.
+- A name made of blanks or control characters is refused when creating a contact instead of ending up as a card
+  called *Unnamed*.
+- A server answer without an address for a contact is skipped instead of breaking the next lookup.
+
 ## 1.1.4 – 2026-09-22
 
 - Changing the phones or emails of a contact synced from an iPhone works again: types such as *cell, voice* or a label
