@@ -35,7 +35,8 @@ SKIP_FILES = ("*.pyc", ".DS_Store", "Thumbs.db", ".gitignore", ".mcpbignore", "*
               ".prettierignore", ".eslintignore", ".nycrc", ".babelrc", ".pnp.*", "*.map",
               "npm-debug.log*", "yarn-debug.log*", "yarn-error.log*", "package-lock.json",
               "yarn.lock", "*.mcpb", "*.d.ts", "*.tsbuildinfo", "tsconfig.json")
-SKIP_DIRS = ("__pycache__", ".git", ".npm", ".yarn", ".bin", ".cache")
+SKIP_DIRS = ("__pycache__", ".git", ".npm", ".yarn", ".bin", ".cache",
+             "receipts", "review-receipts", "tests")
 STAMP = (1980, 1, 1, 0, 0, 0)
 PNG = b"\x89PNG\r\n\x1a\n"
 DIRNAME = "${__dirname}/"
