@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.6 – 2026-09-23
+
+- **An ended DSM session can no longer cost a contact.** DSM answers with its login page and HTTP 200; that page was
+  taken for the contact, patched and written back, which left the card with almost nothing on it while the tool
+  reported success. A reply that is not a contact is refused now, and a change is only "done" when the NAS confirms
+  it the way the protocol says.
+- **An address the NAS points at somewhere else is refused.** Every request carries the DSM password, so a server
+  answering with `https://elsewhere/` as the user's address would have been handed it.
+- Without a usable ETag a change now says "the contact has to still exist" instead of overwriting blindly, and a weak
+  ETag (behind a compressing proxy, say) no longer makes every change fail.
+- A contact with several notes shows all of them; post box and c/o line of an address are shown; a label belonging to
+  a replaced phone number or email is removed with it.
+- Searching for a number no longer matches across two different numbers, and `list_addressbooks` counts a book
+  instead of downloading it (a book of 100 contacts was well over a megabyte).
+- The extension no longer picks up a `CARDDAV_BASE_URL` that happens to be set on the computer.
+
 ## 1.1.5 – 2026-09-23
 
 - A display name that is not simply first and last name — a company, a name with a title — is no longer overwritten

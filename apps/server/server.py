@@ -283,7 +283,7 @@ def summarize(props: list[Prop], href: str = "", etag: str = "",
         return ", ".join(t) if t else default
 
     out: dict[str, Any] = {}
-    emails, phones, addresses, urls = [], [], [], []
+    emails, phones, addresses, urls, notes = [], [], [], [], []
     has_photo = False
 
     for p in props:
@@ -325,13 +325,17 @@ def summarize(props: list[Prop], href: str = "", etag: str = "",
             c += [""] * (7 - len(c))
             addresses.append({
                 "type": label_for(p, "other"),
+                **({"po_box": c[0]} if c[0] else {}),
+                **({"extended": c[1]} if c[1] else {}),
                 "street": c[2], "city": c[3], "region": c[4],
                 "postal_code": c[5], "country": c[6],
             })
         elif n == "URL":
             urls.append({"value": unescape(p.value), "type": label_for(p, "")})
         elif n == "NOTE":
-            out["note"] = unescape(p.value)
+            # a card can carry several notes; showing only the last one would
+            # hide what an update then replaces
+            notes.append(unescape(p.value))
         elif n == "BDAY":
             out["birthday"] = unescape(p.value)
         elif n == "NICKNAME":
@@ -343,6 +347,8 @@ def summarize(props: list[Prop], href: str = "", etag: str = "",
         elif n == "REV" and full:
             out["last_modified"] = unescape(p.value)
 
+    if notes:
+        out["note"] = "\n".join(notes)
     if emails:
         out["emails"] = emails
     if phones:
@@ -456,10 +462,30 @@ class Client:
         self._books: list[dict[str, str]] | None = None
         self._cache: dict[str, tuple[float, list[dict]]] = {}
 
-    def abs(self, href: str) -> str:
+    def abs(self, href: str, check: bool = True) -> str:
+        """An address from the server as a full URL - on the NAS and nowhere else.
+
+        Every request carries the DSM password in its Authorization header, so
+        a server that answers with an address somewhere else - a principal at
+        https://elsewhere/ - would be handed the password. Such an address is
+        refused instead of followed. check=False is for comparing what the
+        caller typed, which is no request.
+        """
         if href.startswith("http://") or href.startswith("https://"):
-            return href
-        return self.origin + href if href.startswith("/") else urljoin(self.base, href)
+            url = href
+        elif href.startswith("/"):
+            url = self.origin + href
+        else:
+            url = urljoin(self.base, href)
+        if check:
+            pr, own = urlparse(url), urlparse(self.origin)
+            if (pr.scheme.lower(), pr.netloc.lower()) != (own.scheme.lower(), own.netloc.lower()):
+                raise CardDavError(
+                    f"{self.origin} answered with an address somewhere else ({url}). "
+                    "That is not followed: the password goes with every request. "
+                    "Check the NAS address."
+                )
+        return url
 
     def _req(self, method: str, url: str, body: str | None = None,
              depth: str | None = None, extra: dict | None = None,
@@ -524,6 +550,19 @@ class Client:
                 f"{r.headers.get('Location', '?')}) and not carried out. "
                 "Check the NAS address and the HTTPS switch."
             )
+        # A change is only done when the server says so in the way DAV does.
+        # DSM answers an expired session with its login page and HTTP 200, and
+        # that would otherwise pass for "saved" while nothing was written.
+        if write:
+            expected = (200, 201, 204) if method == "PUT" else (200, 202, 204)
+            ctype = r.headers.get("Content-Type", "")
+            if r.status_code not in expected or "html" in ctype.lower():
+                raise CardDavError(
+                    f"{method} {url} was answered with HTTP {r.status_code} "
+                    f"({ctype or 'no content type'}) instead of confirming the change, "
+                    "so nothing was changed. The DSM session may have ended - open DSM "
+                    "once, then try again."
+                )
         return r
 
     def _xml(self, r: httpx.Response) -> ET.Element:
@@ -680,22 +719,47 @@ class Client:
 
     def get_raw(self, href: str) -> tuple[str, str]:
         r = self._req("GET", self.abs(href))
-        return r.text, r.headers.get("ETag", "")
+        card = r.text
+        # DSM answers an expired session with its login page and HTTP 200. That
+        # text must never reach patch_vcard: what came back would be written
+        # over the contact, and everything the card held would be gone.
+        if not card.lstrip("﻿ \t\r\n").upper().startswith("BEGIN:VCARD"):
+            raise CardDavError(
+                f"{self.abs(href)} did not return a contact but "
+                f"{r.headers.get('Content-Type', 'something else')}. The DSM session may "
+                "have ended - open DSM once, then try again. Nothing was changed."
+            )
+        return card, r.headers.get("ETag", "")
+
+    @staticmethod
+    def _if_match(etag: str | None) -> str:
+        """What may go into If-Match. A weak validator is not allowed there
+        (servers answer 400), and without one at all the most that can be said
+        is that the contact has to still exist."""
+        etag = (etag or "").strip()
+        return etag if etag and not etag.upper().startswith("W/") else "*"
 
     def put(self, url: str, vcard: str, etag: str | None = None,
             create: bool = False) -> str:
-        extra = {}
-        if create:
-            extra["If-None-Match"] = "*"
-        elif etag:
-            extra["If-Match"] = etag
+        extra = {"If-None-Match": "*"} if create else {"If-Match": self._if_match(etag)}
         r = self._req("PUT", url, vcard, extra=extra, content_type="text/vcard; charset=utf-8")
         self._cache.clear()
         return r.headers.get("ETag", "")
 
     def delete(self, url: str, etag: str | None = None) -> None:
-        self._req("DELETE", url, extra={"If-Match": etag} if etag else None)
+        self._req("DELETE", url, extra={"If-Match": self._if_match(etag)})
         self._cache.clear()
+
+    def count(self, book: dict[str, str]) -> int:
+        """How many contacts a book holds, without downloading them."""
+        root = self._propfind_prop(book["url"], "<d:getetag/>", depth="1")
+        own = urlparse(book["url"]).path.rstrip("/")
+        n = 0
+        for resp in root.iter(f"{{{DAV}}}response"):
+            href = (resp.findtext(f"{{{DAV}}}href") or "").strip()
+            if href and urlparse(href).path.rstrip("/") != own:
+                n += 1
+        return n
 
     def find(self, ident: str, book_ref: str | None = None) -> tuple[dict, dict]:
         """Locate exactly one contact by UID, href, or (part of) the display name.
@@ -710,7 +774,7 @@ class Client:
             # "" would equal the UID of every contact that has none
             raise CardDavError("No contact given: pass its uid, href or name.")
         ident_l = ident.lower()
-        target = unquote(self.abs(ident))
+        target = unquote(self.abs(ident, check=False))
         by_id, by_name = [], []
         uids: dict[str, int] = {}
         for b in self.books_for(book_ref):
@@ -909,11 +973,17 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
             new_lines.append(_prop_line("TEL", escape(p.value), [p.type]))
 
     version = next((p.value.strip() for p in props if p.name == "VERSION"), "") or "3.0"
+    # Apple keeps a label in its own group: item1.TEL with item1.X-ABLabel.
+    # When the TEL goes, its label has to go with it, or the card collects
+    # labels that belong to nothing.
+    orphaned = {p.group for p in props if p.group and p.name in drop}
     kept = []
     for p in props:
         if p.name in ("BEGIN", "END", "REV"):
             continue
         if p.name in drop:
+            continue
+        if p.group and p.group in orphaned and p.name.startswith("X-AB"):
             continue
         kept.append(p.raw)
     rev = f"REV:{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
@@ -936,7 +1006,9 @@ def list_addressbooks() -> list[dict]:
     out = []
     for b in c.addressbooks():
         try:
-            n = len(c.fetch_all(b))
+            # counted, not downloaded: a book of 100 contacts is well over a
+            # megabyte, and nobody asked for its contents here
+            n = c.count(b)
         except CardDavError:
             n = -1
         row = {"name": b["name"], "contacts": n, "href": b["href"]}
@@ -958,6 +1030,7 @@ def list_contacts(addressbook: str | None = None, limit: int = 100,
     items = c.fetch_all(book)
     rows = [summarize(parse_vcard(i["raw"]), i["href"], i["etag"]) for i in items]
     rows.sort(key=lambda r: r.get("full_name", "").lower())
+    offset = max(0, offset)  # a negative one would count from the end
     window = rows[offset:offset + max(1, min(limit, 500))]
     return {"addressbook": book["name"], "total": len(rows),
             "returned": len(window), "offset": offset, "contacts": window}
@@ -983,8 +1056,10 @@ def search_contacts(query: str, addressbook: str | None = None,
             ]).lower()
             match = q in hay
             if not match and len(digits) >= 4:
-                tel = re.sub(r"\D", "", " ".join(p["value"] for p in s.get("phones", [])))
-                match = digits in tel
+                # per number: run together, the end of one and the start of the
+                # next would make a match nobody meant
+                match = any(digits in re.sub(r"\D", "", p["value"])
+                            for p in s.get("phones", []))
             if match:
                 s["addressbook"] = b["name"]
                 hits.append(s)
