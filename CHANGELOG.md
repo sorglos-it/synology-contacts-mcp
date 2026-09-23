@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.7 – 2026-09-23
+
+- **A redirect is never followed any more, not even when reading.** Answering a read with "look over there" was
+  enough to get a contact from somewhere else patched and written back to the NAS - the real card was then gone,
+  while the change reported success. Every redirect is now reported instead of followed.
+- **A change is no longer lost silently when the NAS gives no usable version mark.** Behind a compressing proxy the
+  mark is weak and cannot be used; the contact is read once more directly before writing, and a change someone else
+  made in between stops the write instead of being overwritten. Deleting checks that the address still holds the
+  same contact.
+- A label stays with the property it belongs to: replacing the phone numbers no longer strips an address of its
+  label.
+- `list_addressbooks` counts only contacts (not folders or other files) and reuses a listing made moments ago
+  instead of asking again.
+- A display name made from the name parts keeps its spelling when a first or last name changes: *Dr. Anna Müller*
+  becomes *Dr. Anna Schmidt*, *Müller, Anna* becomes *Müller, Berta*. A company name is still left alone.
+- A card whose address points off the NAS is skipped instead of breaking every lookup.
+- The checks that prove all of this live in `apps/server/tests/` now and run against fake servers.
+
 ## 1.1.6 – 2026-09-23
 
 - **An ended DSM session can no longer cost a contact.** DSM answers with its login page and HTTP 200; that page was

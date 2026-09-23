@@ -125,8 +125,19 @@ apps/server/manifest.json    name, settings and start command of the extension (
 apps/server/server.py        the server; its dependencies sit in the PEP 723 header of this one file
 apps/server/assets/icon.png  icon shown in Claude Desktop
 apps/server/VERSION          version, the same as in manifest.json
+apps/server/tests/           checks against fake servers; never contact a real NAS and never ship in the bundle
 tools/build.py               packs apps/server, README.md and LICENSE into dist/synology-contacts-<version>.mcpb
 ```
+
+```bash
+cd apps/server/tests
+uv run --with "mcp>=2.0,<3" --with httpx python test_contacts.py   # the tools against a fake address book
+uv run --with cryptography python test_mcp.py                      # the same over real MCP, as Claude sees it
+uv run --with "mcp>=2.0,<3" --with httpx --with cryptography python test_tls.py   # certificate checking
+```
+
+Every check prints one line and the run ends with `all passed`. `test_tls.py` also checks the calendar extension
+when `synology-calendar-mcp` sits next to this folder.
 
 ```bash
 python tools/build.py        # Python 3.8 or newer, nothing else; `uv run tools/build.py` works too

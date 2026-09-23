@@ -497,13 +497,15 @@ class Client:
             headers["Content-Type"] = content_type
         if extra:
             headers.update(extra)
-        # Writes never follow a redirect: httpx repeats a PUT or DELETE that
-        # was answered with 302 as a GET, and the GET's 200 would then pass
-        # for a successful delete while the card stays where it was.
+        # Nothing follows a redirect. For a write httpx would repeat a PUT or
+        # DELETE answered with 302 as a GET, and that GET's 200 would pass for
+        # a successful change. For a read the answer would come from wherever
+        # the redirect points: a contact from somewhere else, patched and
+        # written back to the NAS, and the real card is gone.
         write = method in ("PUT", "DELETE")
         try:
             r = self._http.request(method, url, content=body.encode("utf-8") if body else None,
-                                   headers=headers, follow_redirects=not write)
+                                   headers=headers, follow_redirects=False)
         except httpx.InvalidURL as e:  # not an HTTPError: a typo like nas:50o1
             raise CardDavError(
                 f"{url} is not a valid address ({e}). Check the NAS address: "
@@ -544,11 +546,12 @@ class Client:
             )
         if r.status_code >= 400:
             raise CardDavError(f"{method} {url} -> HTTP {r.status_code}: {r.text[:300]}")
-        if write and r.is_redirect:
+        if r.is_redirect:
             raise CardDavError(
                 f"{method} {url} was redirected (HTTP {r.status_code} to "
-                f"{r.headers.get('Location', '?')}) and not carried out. "
-                "Check the NAS address and the HTTPS switch."
+                f"{r.headers.get('Location', '?')}) and not carried out. Redirects are "
+                "not followed: the answer would come from somewhere else. Check the NAS "
+                "address and the HTTPS switch."
             )
         # A change is only done when the server says so in the way DAV does.
         # DSM answers an expired session with its login page and HTTP 200, and
@@ -709,6 +712,10 @@ class Client:
             if (href_el is None or not (href_el.text or "").strip()
                     or data_el is None or not (data_el.text or "").strip()):
                 continue
+            try:
+                self.abs(href_el.text)  # an address off the NAS has no business here
+            except CardDavError:
+                continue
             items.append({
                 "href": href_el.text,
                 "etag": (etag_el.text or "") if etag_el is not None else "",
@@ -734,30 +741,61 @@ class Client:
     @staticmethod
     def _if_match(etag: str | None) -> str:
         """What may go into If-Match. A weak validator is not allowed there
-        (servers answer 400), and without one at all the most that can be said
-        is that the contact has to still exist."""
+        (servers answer 400 or 412), and without one at all the most that can
+        be said is that the contact has to still exist."""
         etag = (etag or "").strip()
         return etag if etag and not etag.upper().startswith("W/") else "*"
 
+    def _unchanged(self, url: str, expect: str) -> None:
+        """Reads the card once more and refuses when it is not what the change
+        was built on. Only needed when the server gave no usable version mark -
+        without it, "If-Match: *" would overwrite whatever is there now, and a
+        change someone else made in between would be gone without a word."""
+        current, _ = self.get_raw(url)
+        if current.strip() != expect.strip():
+            raise CardDavError(
+                "The contact changed on the server since it was read, and this NAS gives "
+                "no version mark to hold against it. Read it again and repeat the change."
+            )
+
     def put(self, url: str, vcard: str, etag: str | None = None,
-            create: bool = False) -> str:
-        extra = {"If-None-Match": "*"} if create else {"If-Match": self._if_match(etag)}
+            create: bool = False, expect: str | None = None) -> str:
+        if create:
+            extra = {"If-None-Match": "*"}
+        else:
+            extra = {"If-Match": self._if_match(etag)}
+            if extra["If-Match"] == "*" and expect is not None:
+                self._unchanged(url, expect)
         r = self._req("PUT", url, vcard, extra=extra, content_type="text/vcard; charset=utf-8")
         self._cache.clear()
         return r.headers.get("ETag", "")
 
-    def delete(self, url: str, etag: str | None = None) -> None:
+    def delete(self, url: str, etag: str | None = None, uid: str | None = None) -> None:
+        if self._if_match(etag) == "*" and uid:
+            # without a version mark, at least make sure it is still the same
+            # contact at this address
+            props = parse_vcard(self.get_raw(url)[0])
+            now = next((unescape(p.value) for p in props if p.name == "UID"), "")
+            if now and now != uid:
+                raise CardDavError(
+                    f"{url} no longer holds the contact that was read (uid {now!r} instead "
+                    f"of {uid!r}). Nothing was deleted; look it up again."
+                )
         self._req("DELETE", url, extra={"If-Match": self._if_match(etag)})
         self._cache.clear()
 
     def count(self, book: dict[str, str]) -> int:
         """How many contacts a book holds, without downloading them."""
+        cached = self._cache.get(book["url"])
+        if cached and time.time() - cached[0] < CACHE_TTL:
+            return len(cached[1])  # already known from a listing a moment ago
         root = self._propfind_prop(book["url"], "<d:getetag/>", depth="1")
         own = urlparse(book["url"]).path.rstrip("/")
         n = 0
         for resp in root.iter(f"{{{DAV}}}response"):
-            href = (resp.findtext(f"{{{DAV}}}href") or "").strip()
-            if href and urlparse(href).path.rstrip("/") != own:
+            path = urlparse((resp.findtext(f"{{{DAV}}}href") or "").strip()).path
+            # only the cards, not the book itself and not another collection
+            if path.rstrip("/") != own and path.lower().endswith(".vcf"):
                 n += 1
         return n
 
@@ -870,6 +908,36 @@ def _display_name(full_name: str | None, first: str | None, last: str | None,
             or _clean(org))
 
 
+def _joined(*parts: str) -> str:
+    return " ".join(x for x in parts if x)
+
+
+# The spellings a display name can follow. A name written in one of them was
+# plainly made from the name parts, so it follows a new first or last name -
+# in the same spelling, title and all. Anything else was chosen deliberately.
+_STYLES = {
+    "plain": lambda f, g, e, p, s: _joined(g, e, f),
+    "prefix": lambda f, g, e, p, s: _joined(p, g, e, f),
+    "suffix": lambda f, g, e, p, s: _joined(g, e, f, s),
+    "prefix suffix": lambda f, g, e, p, s: _joined(p, g, e, f, s),
+    "last, first": lambda f, g, e, p, s: f"{f}, {g}" if f and g else "",
+    "last, title first": lambda f, g, e, p, s: f"{f}, {_joined(p, g)}" if f and g else "",
+}
+
+
+def _name_parts(n: list[str]) -> list[str]:
+    return [_clean(x) for x in (list(n) + [""] * 5)[:5]]
+
+
+def _name_style(n: list[str], fn: str) -> str | None:
+    parts = _name_parts(n)
+    return next((name for name, build in _STYLES.items() if fn and build(*parts) == fn), None)
+
+
+def _name_in_style(n: list[str], style: str | None) -> str:
+    return _STYLES[style](*_name_parts(n)) if style in _STYLES else ""
+
+
 def _prop_line(name: str, value: str, types: Iterable[str] = ()) -> str:
     tp = "".join(f";TYPE={t}" for t in _types(types))
     return fold(f"{name}{tp}:{value}")
@@ -926,8 +994,8 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
     cur = next((p for p in props if p.name == "N"), None)
     c = [unescape(x) for x in split_escaped(cur.value)] if cur else []
     c += [""] * (5 - len(c))
-    old_name = _display_name(None, c[1], c[0], None)
     old_fn = _clean(next((unescape(p.value) for p in props if p.name == "FN"), ""))
+    old_style = _name_style(c, old_fn)
     if first is not None or last is not None:
         if last is not None:
             c[0] = last
@@ -936,10 +1004,10 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         drop.add("N")
         new_lines.append(_prop_line("N", ";".join(escape(x) for x in c[:5])))
         if fn is None:
-            # A display name that is not simply the first and last name was
-            # chosen deliberately - a company, a card with a title - and a new
-            # first name must not overwrite it.
-            fn = "" if old_fn == old_name else None
+            # A display name that was plainly made of the name parts follows
+            # them, in the same spelling; one chosen deliberately - a company,
+            # a name the owner spelled their own way - is left alone.
+            fn = "" if old_style else None
     if fn is not None and not _clean(fn):
         # FN is mandatory, and the address-book query filters on it: a card
         # without one would vanish from every tool. Derive it from the name,
@@ -948,7 +1016,7 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
         if org is None:
             cur_org = next((p for p in props if p.name == "ORG"), None)
             org = unescape(split_escaped(cur_org.value)[0]) if cur_org else ""
-        fn = _display_name(None, c[1], c[0], org) or None
+        fn = (_name_in_style(c, old_style) or _display_name(None, c[1], c[0], org)) or None
     set_simple("FN", fn)
     if changes.get("organization") is not None:
         drop.add("ORG")
@@ -975,8 +1043,11 @@ def patch_vcard(raw: str, changes: dict[str, Any]) -> str:
     version = next((p.value.strip() for p in props if p.name == "VERSION"), "") or "3.0"
     # Apple keeps a label in its own group: item1.TEL with item1.X-ABLabel.
     # When the TEL goes, its label has to go with it, or the card collects
-    # labels that belong to nothing.
-    orphaned = {p.group for p in props if p.group and p.name in drop}
+    # labels that belong to nothing - but only when nothing else in that group
+    # survives, or replacing the phones would strip the address of its label.
+    still_used = {p.group for p in props
+                  if p.group and p.name not in drop and not p.name.startswith("X-AB")}
+    orphaned = {p.group for p in props if p.group and p.name in drop} - still_used
     kept = []
     for p in props:
         if p.name in ("BEGIN", "END", "REV"):
@@ -1131,7 +1202,7 @@ def update_contact(identifier: str, full_name: str | None = None,
     if all(v is None for v in changes.values()):
         raise CardDavError("No fields given to update.")
     new = patch_vcard(raw, changes)
-    c.put(c.abs(item["href"]), new, etag=etag or item.get("etag") or None)
+    c.put(c.abs(item["href"]), new, etag=etag or item.get("etag") or None, expect=raw)
     # read back the very card just written - a new lookup by UID or name
     # could land on a namesake
     raw, etag = c.get_raw(item["href"])
@@ -1149,7 +1220,7 @@ def delete_contact(identifier: str, addressbook: str | None = None) -> dict:
     """
     c = client()
     summary, item = c.find(identifier, addressbook)
-    c.delete(c.abs(item["href"]), etag=item.get("etag") or None)
+    c.delete(c.abs(item["href"]), etag=item.get("etag") or None, uid=summary.get("uid"))
     return {"deleted": True, "uid": summary.get("uid"),
             "full_name": summary.get("full_name"),
             "addressbook": summary["addressbook"]}
