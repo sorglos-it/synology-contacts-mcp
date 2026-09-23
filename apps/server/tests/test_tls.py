@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import ssl
+import tempfile
 import subprocess
 import sys
 import threading
@@ -24,8 +25,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 import ipaddress
 
-HERE = Path(__file__).parent / "tls"
-HERE.mkdir(exist_ok=True)
+# throwaway certificates: they live in a temporary folder, not in the repo
+HERE = Path(tempfile.mkdtemp(prefix="tls-test-"))
 HOME = Path(__file__).resolve().parents[1]
 SIBLING = Path(__file__).resolve().parents[4]
 CAL = Path(os.environ.get("CAL_DIR", HOME if (HOME / "index.js").is_file()

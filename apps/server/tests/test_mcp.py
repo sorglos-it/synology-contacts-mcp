@@ -12,7 +12,9 @@ import json
 import os
 import socketserver
 import ssl
+import pathlib
 import subprocess
+import tempfile
 import sys
 import threading
 from pathlib import Path
@@ -116,7 +118,7 @@ c = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(k
      .serial_number(1).not_valid_before(now - dt.timedelta(hours=1)).not_valid_after(now + dt.timedelta(days=1))
      .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
      .sign(k, hashes.SHA256()))
-pem = HERE / "e2e-self.pem"
+pem = pathlib.Path(tempfile.mkdtemp(prefix="tls-test-")) / "self.pem"
 pem.write_bytes(c.public_bytes(serialization.Encoding.PEM) + k.private_bytes(
     serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 

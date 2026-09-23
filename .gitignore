@@ -27,3 +27,7 @@ receipts/
 review-receipts/
 Thumbs.db
 .DS_Store
+
+# Wegwerf-Zertifikate der Tests entstehen im Temp-Ordner
+apps/*/tests/tls/
+apps/*/tests/*.pem
